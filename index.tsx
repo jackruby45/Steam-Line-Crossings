@@ -1467,6 +1467,7 @@ class ThreeDManager {
     private pipeObjects: THREE.Object3D[] = [];
     private isoSurfaceObjects: THREE.Mesh[] = [];
     private soilLayerObjects: THREE.Object3D[] = [];
+    private axesObjects: THREE.Object3D[] = [];
 
     constructor(private canvasElement: HTMLCanvasElement) {
         this.scene = new THREE.Scene();
@@ -1475,7 +1476,7 @@ class ThreeDManager {
         this.camera = new THREE.PerspectiveCamera(75, canvasElement.width / canvasElement.height, 0.1, 5000);
         this.camera.position.set(0, 10, 20);
 
-        this.renderer = new THREE.WebGLRenderer({ canvas: canvasElement, antialias: true });
+        this.renderer = new THREE.WebGLRenderer({ canvas: canvasElement, antialias: true, logarithmicDepthBuffer: true });
         this.renderer.setSize(canvasElement.clientWidth, canvasElement.clientHeight, false);
         this.renderer.setPixelRatio(window.devicePixelRatio);
 
@@ -1515,17 +1516,16 @@ class ThreeDManager {
 
     buildScene(sceneData: SceneData, isoSurfacesData: IsoSurface[]) {
         // Clear previous objects
-        this.pipeObjects.forEach(obj => this.scene.remove(obj));
+        [...this.pipeObjects, ...this.isoSurfaceObjects, ...this.soilLayerObjects, ...this.axesObjects].forEach(obj => this.scene.remove(obj));
         this.pipeObjects = [];
+        this.isoSurfaceObjects = [];
+        this.soilLayerObjects = [];
+        this.axesObjects = [];
         this.pipeLabels.forEach(l => {
             l.label.element.remove();
             this.scene.remove(l.label);
         });
         this.pipeLabels = [];
-        this.isoSurfaceObjects.forEach(obj => this.scene.remove(obj));
-        this.isoSurfaceObjects = [];
-        this.soilLayerObjects.forEach(obj => this.scene.remove(obj));
-        this.soilLayerObjects = [];
         
         // Soil Layers
         const worldBoxWidth = sceneData.worldWidth;
@@ -1539,10 +1539,8 @@ class ThreeDManager {
 
             const layerGeo = new THREE.BoxGeometry(worldBoxWidth, layerHeight, worldBoxDepth);
             
-            // Color based on conductivity. Normalize k from a reasonable range (e.g., 0.2 to 3.0)
             const kMin = 0.2, kMax = 3.0;
             const kRatio = Math.max(0, Math.min(1, (layer.k - kMin) / (kMax - kMin)));
-            // We'll go from a light brown (low k) to a dark brown (high k)
             const color = new THREE.Color().setHSL(0.08, 0.5, 0.6 - 0.4 * kRatio);
 
             const layerMat = new THREE.MeshStandardMaterial({
@@ -1570,7 +1568,6 @@ class ThreeDManager {
         sceneData.pipes.forEach(pipe => {
             const pipeGroup = new THREE.Group();
             
-            // Outer pipe (steel)
             const pipeGeo = new THREE.CylinderGeometry(pipe.r_pipe, pipe.r_pipe, pipeLength, 32);
             const pipeMat = new THREE.MeshStandardMaterial({ 
                 color: new THREE.Color(getTemperatureColor(pipe.temp, sceneData.minTemp, sceneData.maxTemp)),
@@ -1580,7 +1577,6 @@ class ThreeDManager {
             const pipeMesh = new THREE.Mesh(pipeGeo, pipeMat);
             pipeGroup.add(pipeMesh);
 
-            // Insulation
             if (pipe.r_ins > pipe.r_pipe) {
                 const insGeo = new THREE.CylinderGeometry(pipe.r_ins, pipe.r_ins, pipeLength, 32);
                 const insMat = new THREE.MeshStandardMaterial({ 
@@ -1593,11 +1589,10 @@ class ThreeDManager {
                 pipeGroup.add(insMesh);
             }
             
-            // Bedding
             if (pipe.r_bed > pipe.r_ins) {
                  const bedGeo = new THREE.CylinderGeometry(pipe.r_bed, pipe.r_bed, pipeLength, 32);
                  const bedMat = new THREE.MeshStandardMaterial({ 
-                    color: 0x8B4513, // SaddleBrown
+                    color: 0x8B4513,
                     roughness: 0.9,
                     transparent: true,
                     opacity: 0.15
@@ -1624,7 +1619,6 @@ class ThreeDManager {
             this.scene.add(pipeGroup);
             this.pipeObjects.push(pipeGroup);
 
-            // Pipe Label
             const labelDiv = document.createElement('div');
             labelDiv.className = 'pipe-label';
             const displayTemp = CONVERSIONS.CtoF(pipe.temp);
@@ -1633,8 +1627,6 @@ class ThreeDManager {
             this.scene.add(label);
             this.pipeLabels.push({ label, pipeCenter, pipeDirection, pipeRadius: pipe.r_bed });
         });
-
-        this.updateLabels();
 
         // Isosurfaces
         const activeIsoSurfaces = isoSurfacesData.filter(iso => iso.enabled);
@@ -1653,774 +1645,776 @@ class ThreeDManager {
                 for (let j = 0; j < dimY; j++) {
                     for (let k = 0; k < dimZ; k++) {
                         const worldX = worldBox.min.x + (i / (dimX - 1)) * (worldBox.max.x - worldBox.min.x);
-                        const worldZ = worldBox.min.z + (k / (dimZ - 1)) * (worldBox.max.z - worldBox.min.z);
+                        const worldZ_3D = worldBox.min.z + (k / (dimZ - 1)) * (worldBox.max.z - worldBox.min.z);
                         // Y in three.js is Z in our physics calc, and it's negative
-                        const worldY_Physics = -(worldBox.min.y + (j / (dimY - 1)) * (worldBox.max.y - worldBox.min.y));
+                        const worldZ_Physics = -(worldBox.min.y + (j / (dimY - 1)) * (worldBox.max.y - worldBox.min.y));
                         
-                        const temp = calculateTemperatureAtPoint(worldX, worldY_Physics, sceneData);
+                        const temp = calculateTemperatureAtPoint(worldX, worldZ_Physics, sceneData);
                         scalarField[i + j * dimX + k * dimX * dimY] = temp;
                     }
                 }
             }
 
             activeIsoSurfaces.forEach(iso => {
-                const tempC = CONVERSIONS.FtoC(iso.temp);
-                const vertices = marchingCubes.run(scalarField as any, dims, tempC);
-                
-                if (vertices.length > 0) {
-                    const geometry = new THREE.BufferGeometry();
-                    const positions = new Float32Array(vertices.length * 3);
-                    vertices.forEach((v, index) => {
-                       // Scale vertex back to world coordinates
-                       positions[index * 3] = worldBox.min.x + (v.x / (dimX - 1)) * (worldBox.max.x - worldBox.min.x);
-                       positions[index * 3 + 1] = worldBox.min.y + (v.y / (dimY - 1)) * (worldBox.max.y - worldBox.min.y);
-                       positions[index * 3 + 2] = worldBox.min.z + (v.z / (dimZ - 1)) * (worldBox.max.z - worldBox.min.z);
-                    });
+                try {
+                    const tempC = CONVERSIONS.FtoC(iso.temp);
+                    const vertices = marchingCubes.run(scalarField as any, dims, tempC);
+                    
+                    if (vertices.length > 0) {
+                        const geometry = new THREE.BufferGeometry();
+                        const positions = new Float32Array(vertices.length * 3);
+                        for(let i=0; i<vertices.length; i++) {
+                            positions[i * 3] = vertices[i].x;
+                            positions[i * 3 + 1] = vertices[i].y;
+                            positions[i * 3 + 2] = vertices[i].z;
+                        }
+                        
+                        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                        geometry.computeVertexNormals();
+                        
+                        const matrix = new THREE.Matrix4().makeScale(
+                            (worldBox.max.x - worldBox.min.x) / (dimX - 1),
+                            (worldBox.max.y - worldBox.min.y) / (dimY - 1),
+                            (worldBox.max.z - worldBox.min.z) / (dimZ - 1)
+                        ).setPosition(worldBox.min);
+                        geometry.applyMatrix4(matrix);
 
-                    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-                    geometry.computeVertexNormals();
-                    
-                    const material = new THREE.MeshStandardMaterial({
-                        color: new THREE.Color(iso.color),
-                        opacity: iso.opacity,
-                        transparent: true,
-                        side: THREE.DoubleSide,
-                        roughness: 0.7
-                    });
-                    
-                    const mesh = new THREE.Mesh(geometry, material);
-                    this.scene.add(mesh);
-                    this.isoSurfaceObjects.push(mesh);
+                        const material = new THREE.MeshStandardMaterial({
+                            color: iso.color,
+                            opacity: iso.opacity,
+                            transparent: true,
+                            side: THREE.DoubleSide,
+                        });
+
+                        const mesh = new THREE.Mesh(geometry, material);
+                        this.scene.add(mesh);
+                        this.isoSurfaceObjects.push(mesh);
+                    }
+                } catch(e) {
+                    console.error("Failed to generate isosurface for temp", iso.temp, e);
                 }
             });
         }
-        
-        // Adjust camera to fit the scene's scope
-        const box = new THREE.Box3();
 
-        // Define the bounding box based on the semantic dimensions of the scene data,
-        // not the geometry of the infinitely long pipes. This is the key to correct framing.
-        // Physics Z (depth) maps to negative Three.js Y.
-        // Physics Y (perpendicular) maps to Three.js Z.
-        box.set(
-            new THREE.Vector3(sceneData.worldMinX, -sceneData.worldHeight, sceneData.worldMinY),
-            new THREE.Vector3(
-                sceneData.worldMinX + sceneData.worldWidth, 
-                0, // Ground level
-                sceneData.worldMinY + sceneData.worldDepth
-            )
-        );
-
-        // Also ensure any generated isosurfaces are visible
-        this.isoSurfaceObjects.forEach(obj => box.expandByObject(obj));
-        
-        // Handle case where box is empty or invalid (e.g., first run with no data)
-        if (box.isEmpty() || !Number.isFinite(box.min.lengthSq()) || !Number.isFinite(box.max.lengthSq())) {
-            box.setFromCenterAndSize(new THREE.Vector3(0, -5, 0), new THREE.Vector3(20, 10, 20));
-        }
-
-        const center = new THREE.Vector3();
-        const size = new THREE.Vector3();
-        box.getCenter(center);
-        box.getSize(size);
-
-        const maxDim = Math.max(size.x, size.y, size.z);
-        const fov = this.camera.fov * (Math.PI / 180);
-        const distance = (maxDim / 2) / Math.tan(fov / 2);
-
-        // Position the camera away from the center of the bounding box for a nice view
-        const cameraOffset = new THREE.Vector3(0.5, 0.4, 1).normalize().multiplyScalar(distance * 1.5);
-        this.camera.position.copy(center).add(cameraOffset);
-
-        this.controls.target.copy(center);
-        this.controls.update();
+        this.setupAxes(sceneData);
+        this.animate();
     }
-    
+
+    private setupAxes(sceneData: SceneData) {
+        const { worldMinX, worldWidth, worldMinY, worldDepth, worldHeight } = sceneData;
+        const center = new THREE.Vector3(
+            worldMinX + worldWidth / 2,
+            -worldHeight / 2,
+            worldMinY + worldDepth / 2
+        );
+        const size = Math.max(worldWidth, worldHeight, worldDepth) * 0.6;
+        const axesHelper = new THREE.AxesHelper(size);
+        axesHelper.position.copy(center);
+        axesHelper.position.y = 1; // slightly above ground
+        this.scene.add(axesHelper);
+        this.axesObjects.push(axesHelper);
+
+        const createAxisLabel = (text: string, position: THREE.Vector3) => {
+            const div = document.createElement('div');
+            div.className = 'axis-label';
+            div.textContent = text;
+            const label = new CSS2DObject(div);
+            label.position.copy(position);
+            this.scene.add(label);
+            this.axesObjects.push(label);
+        };
+
+        createAxisLabel('X (ft)', new THREE.Vector3(center.x + size, center.y, center.z));
+        createAxisLabel('Y (Depth)', new THREE.Vector3(center.x, center.y - size, center.z));
+        createAxisLabel('Z (ft)', new THREE.Vector3(center.x, center.y, center.z + size));
+    }
+
     private updateLabels() {
-        this.pipeLabels.forEach(labelInfo => {
-            const { label, pipeCenter, pipeDirection } = labelInfo;
-            const cameraPosition = this.camera.position;
+        const cameraDirection = new THREE.Vector3();
+        this.camera.getWorldDirection(cameraDirection);
+
+        this.pipeLabels.forEach(({ label, pipeCenter, pipeDirection, pipeRadius }) => {
+            const labelPosition = new THREE.Vector3().copy(pipeCenter);
             
-            // Find the point on the infinite line of the pipe that is closest to the camera
-            const line = new THREE.Line3(
-                pipeCenter.clone().addScaledVector(pipeDirection, -1000),
-                pipeCenter.clone().addScaledVector(pipeDirection, 1000)
-            );
-            const closestPointOnLine = new THREE.Vector3();
-            line.closestPointToPoint(cameraPosition, true, closestPointOnLine);
-
-            // Position the label slightly above this closest point, offset towards the camera
-            const offsetDirection = cameraPosition.clone().sub(closestPointOnLine).normalize();
-            // Project offset to be perpendicular to pipe direction to avoid moving along the pipe
-            const componentAlongPipe = offsetDirection.dot(pipeDirection);
-            offsetDirection.sub(pipeDirection.clone().multiplyScalar(componentAlongPipe));
-
-            label.position.copy(closestPointOnLine).addScaledVector(offsetDirection, labelInfo.pipeRadius + 0.5);
+            // Project the camera's "up" vector onto the plane perpendicular to the pipe
+            const planeNormal = pipeDirection;
+            const cameraUp = this.camera.up.clone();
+            const projectedUp = cameraUp.clone().projectOnPlane(planeNormal).normalize();
+            
+            // If projectedUp is zero (camera looking down pipe), use a default
+            if (projectedUp.lengthSq() < 0.001) {
+                if(Math.abs(pipeDirection.y) > 0.9) { // Pipe is mostly vertical
+                    projectedUp.set(0,0,1);
+                } else {
+                    projectedUp.set(0,1,0);
+                }
+            }
+            
+            labelPosition.add(projectedUp.multiplyScalar(pipeRadius * 1.2 + 0.5));
+            label.position.copy(labelPosition);
         });
     }
 
-    stopAnimation() {
-        if (this.animationFrameId) {
-            cancelAnimationFrame(this.animationFrameId);
-            this.animationFrameId = null;
-        }
-    }
-
-    startAnimation() {
-        if (this.animationFrameId === null) {
-            this.animate();
-        }
-    }
-
-    private animate() {
+    animate() {
         this.animationFrameId = requestAnimationFrame(this.animate.bind(this));
-        
         this.controls.update();
         this.updateLabels();
-        
         this.renderer.render(this.scene, this.camera);
         this.labelRenderer.render(this.scene, this.camera);
     }
-}
 
-
-// --- Material Library Management ---
-function loadCustomMaterials(): CustomMaterial[] {
-    try {
-        const stored = localStorage.getItem(MATERIAL_STORAGE_KEY);
-        return stored ? JSON.parse(stored) : [];
-    } catch (e) {
-        console.error("Failed to load custom materials:", e);
-        return [];
+    destroy() {
+        if (this.animationFrameId) {
+            cancelAnimationFrame(this.animationFrameId);
+        }
+        window.removeEventListener('resize', this.onWindowResize);
+        this.labelRenderer.domElement.remove();
+        this.renderer.dispose();
     }
 }
 
-function saveCustomMaterials() {
-    try {
-        localStorage.setItem(MATERIAL_STORAGE_KEY, JSON.stringify(customMaterials));
-    } catch (e) {
-        console.error("Failed to save custom materials:", e);
-    }
+
+function escapeLatex(str: string): string {
+    if (!str) return '';
+    return str.replace(/\\/g, '\\textbackslash{}')
+              .replace(/[{}]/g, (c) => `\\${c}`)
+              .replace(/[#$&%_]/g, (c) => `\\${c}`)
+              .replace(/~/g, '\\textasciitilde{}')
+              .replace(/\^/g, '\\textasciicaret{}');
 }
 
-function addCustomMaterial(type: MaterialType, name: string, kValueRaw: number) {
-    const kValueWmk = CONVERSIONS.btuHrFtFtoWMK(kValueRaw);
+function generateLatexReport(
+    projectInfo: ProjectInfo,
+    inputs: CalculationData['inputs'],
+    results: { pipeId: number, pipeName: string, finalTemp: number }[],
+    detailedCalcs: DetailedCalculations
+): string {
+    const { pipes, soilLayers, T_soil } = inputs;
 
-    if (!name || isNaN(kValueWmk) || kValueWmk < 0) {
-        alert('Invalid material name or k-value.');
+    const projectInfoSection = `
+\\begin{tabular}{ll}
+    \\textbf{Project Name} & ${escapeLatex(projectInfo.name)} \\\\
+    \\textbf{Location} & ${escapeLatex(projectInfo.location)} \\\\
+    \\textbf{System Number} & ${escapeLatex(projectInfo.system)} \\\\
+    \\textbf{Engineer} & ${escapeLatex(projectInfo.engineer)} \\\\
+    \\textbf{Date} & ${escapeLatex(projectInfo.date)} \\\\
+    \\textbf{Revision} & ${escapeLatex(projectInfo.revision)} \\\\
+\\end{tabular}
+
+\\subsection*{Description}
+\\textit{${escapeLatex(projectInfo.description)}}
+    `;
+    
+    const soilInputTable = `
+\\subsection*{Environmental Inputs}
+\\begin{tabular}{|l|c|c|}
+    \\hline
+    \\textbf{Parameter} & \\textbf{Imperial} & \\textbf{SI} \\\\ \\hline
+    Ambient Soil Temperature & ${CONVERSIONS.CtoF(T_soil).toFixed(1)} ${UNIT_SYSTEMS.imperial.temp} & ${T_soil.toFixed(1)} °C \\\\
+    \\hline
+\\end{tabular}
+
+\\subsubsection*{Soil Layers}
+\\begin{tabular}{|c|c|c|c|c|}
+    \\hline
+    \\textbf{Layer} & \\textbf{Thickness (ft)} & \\textbf{Thickness (m)} & \\textbf{k (BTU/hr-ft-°F)} & \\textbf{k (W/m-K)} \\\\ \\hline
+    ${soilLayers.map((layer, i) => `
+        Layer ${i+1} & ${CONVERSIONS.mToFt(layer.thickness).toFixed(2)} & ${layer.thickness.toFixed(2)} & ${CONVERSIONS.wmkToBtuHrFtF(layer.k).toFixed(2)} & ${layer.k.toFixed(2)}
+    `).join('\\\\ \\hline \n')}
+    \\hline
+\\end{tabular}
+    `;
+
+    const pipeInputRows = pipes.map(p => {
+        const tempF = p.temp ? CONVERSIONS.CtoF(p.temp).toFixed(1) : 'N/A';
+        const tempC = p.temp ? p.temp.toFixed(1) : 'N/A';
+        return `
+        ${escapeLatex(p.name)} & ${p.role.replace('_', ' ')} & ${p.orientation} & ${CONVERSIONS.mToFt(p.x).toFixed(2)} & ${CONVERSIONS.mToFt(p.y).toFixed(2)} & ${CONVERSIONS.mToFt(p.z).toFixed(2)} & ${tempF} & ${tempC} \\\\
+        - OD (in/m) & \\multicolumn{7}{l|}{${CONVERSIONS.mToIn(p.od).toFixed(3)} in / ${p.od.toFixed(4)} m} \\\\
+        - Wall Thk (in/m) & \\multicolumn{7}{l|}{${CONVERSIONS.mToIn(p.thickness).toFixed(4)} in / ${p.thickness.toFixed(5)} m} \\\\
+        - Ins Thk (in/m) & \\multicolumn{7}{l|}{${CONVERSIONS.mToIn(p.ins_thickness).toFixed(2)} in / ${p.ins_thickness.toFixed(4)} m} \\\\
+        - Bed Thk (in/m) & \\multicolumn{7}{l|}{${CONVERSIONS.mToIn(p.bed_thickness).toFixed(2)} in / ${p.bed_thickness.toFixed(4)} m} \\\\
+        - k (Pipe/Ins/Bed) & \\multicolumn{7}{l|}{${p.k_pipe.toFixed(1)} / ${p.k_ins.toFixed(3)} / ${p.k_bedding.toFixed(3)} W/m-K}
+        `;
+    }).join('\\\\ \\hline \n');
+
+    const pipeInputTable = `
+\\subsection*{Pipe Inputs}
+\\begin{tabular}{|l|l|l|c|c|c|c|c|}
+    \\hline
+    \\textbf{ID} & \\textbf{Role} & \\textbf{Orient.} & \\textbf{X (ft)} & \\textbf{Y (ft)} & \\textbf{Z (ft)} & \\textbf{Temp (°F)} & \\textbf{Temp (°C)} \\\\ \\hline
+    ${pipeInputRows}
+    \\hline
+\\end{tabular}
+    `;
+    
+    const resultsTable = `
+\\subsection*{Summary of Results}
+\\begin{tabular}{|l|c|c|}
+    \\hline
+    \\textbf{Pipe ID} & \\textbf{Final Temperature (°F)} & \\textbf{Final Temperature (°C)} \\\\ \\hline
+    ${results.map(r => `
+        ${escapeLatex(r.pipeName)} & ${CONVERSIONS.CtoF(r.finalTemp).toFixed(2)} & ${r.finalTemp.toFixed(2)}
+    `).join('\\\\ \\hline \n')}
+    \\hline
+\\end{tabular}
+    `;
+
+    const sourceCalcRows = detailedCalcs.sources.map(s => `
+        ${escapeLatex(s.pipeName)} & ${s.R_pipe.toExponential(2)} & ${s.R_ins.toExponential(2)} & ${s.R_bed.toExponential(2)} & ${s.R_soil.toExponential(2)} & ${s.R_total.toExponential(2)} & ${s.Q.toFixed(2)}
+    `).join('\\\\ \\hline \n');
+    const sourceCalcTable = `
+\\subsection*{Heat Source Calculations}
+\\begin{tabular}{|l|c|c|c|c|c|c|}
+    \\hline
+    \\textbf{Source Pipe} & \\textbf{R\\_pipe} & \\textbf{R\\_ins} & \\textbf{R\\_bed} & \\textbf{R\\_soil} & \\textbf{R\\_total} & \\textbf{Q} \\\\ 
+     & \\multicolumn{5}{c|}{\\textbf{(K-m/W)}} & \\textbf{(W/m)} \\\\ \\hline
+    ${sourceCalcRows}
+    \\hline
+\\end{tabular}
+    `;
+    
+    const affectedPipeCalcSection = detailedCalcs.affectedPipes.map(ap => `
+\\subsubsection*{Affected Pipe: ${escapeLatex(ap.pipeName)}}
+Total Temperature Rise: ${ap.totalTempRise.toFixed(2)} °C
+\\\\ Final Temperature: ${ap.finalTemp.toFixed(2)} °C
+\\begin{tabular}{|l|c|c|c|c|}
+    \\hline
+    \\textbf{From Source} & \\textbf{k\\_path (W/m-K)} & \\textbf{d\\_real (m)} & \\textbf{d\\_image (m)} & \\textbf{Temp Rise (°C)} \\\\ \\hline
+    ${ap.interactions.map(i => `
+        ${escapeLatex(i.sourcePipeName)} & ${i.k_eff_path.toFixed(2)} & ${i.d_real.toFixed(3)} & ${i.d_image.toFixed(3)} & ${i.tempRise.toFixed(3)}
+    `).join('\\\\ \\hline \n')}
+    \\hline
+\\end{tabular}
+    `).join('\n');
+
+    const methodology = `
+\\section{Methodology}
+This analysis calculates the steady-state temperature of buried pipelines subjected to heat transfer from adjacent heat source pipelines and the surrounding soil. The calculation is based on the principle of superposition and the method of images to model the ground surface as an adiabatic (no heat flow) boundary. The methodology is built upon three fundamental engineering principles:
+\\begin{enumerate}
+    \\item The Thermal Resistance Network Model: To calculate the amount of heat leaving a source.
+    \\item The Method of Images: To accurately model the effect of the ground surface.
+    \\item The Principle of Superposition: To combine the heating effects from multiple sources.
+\\end{enumerate}
+
+\\subsection{Step 1: Calculate Heat Flux (\\(Q\\)) from each Heat Source}
+\\subsubsection*{Why it's necessary}
+Before determining how a hot pipe affects its neighbors, we must quantify \\textit{how much} heat it emits. This rate of heat loss is the \\textbf{heat flux (Q)}, measured in Watts per meter (W/m).
+
+\\subsubsection*{How it's calculated: The Thermal-Electrical Analogy}
+The calculation uses the thermal resistance model, an analogue to Ohm's Law. Heat flow (\\(Q\\)) is like current, temperature difference (\\(\\Delta T\\)) is like voltage, and thermal resistance (\\(R\\)) is like electrical resistance.
+\\begin{equation}
+    Q = \\frac{\\Delta T}{R_{total}} = \\frac{T_{pipe} - T_{soil}}{R_{pipe} + R_{ins} + R_{bed} + R_{soil}}
+\\end{equation}
+Where \\(R_{total}\\) is the sum of the series resistances (K\\(\\cdot\\)m/W) of the pipe wall, insulation, bedding, and soil.
+
+\\subsubsection*{Source of Resistance Formulas}
+The formulas are derived from Fourier's Law of Conduction (\\(Q = -k A \\frac{dT}{dx}\\)).
+
+\\paragraph{A) Cylindrical Layers (Pipe, Insulation, Bedding)}
+For heat flowing radially through a hollow cylinder, integrating Fourier's Law gives:
+\\begin{equation}
+    R_{cyl} = \\frac{\\ln(r_{outer} / r_{inner})}{2 \\pi k}
+\\end{equation}
+
+\\paragraph{B) Soil Resistance (Buried Cylinder)}
+The soil's resistance is complex because the ground surface acts as a near-perfect insulator (an adiabatic boundary). To model this, we use the \\textbf{Method of Images}. This powerful mathematical trick involves imagining a "mirror image" of the heat source located above the ground at the same distance the real pipe is below it. This creates a symmetrical system where the ground surface becomes a line of zero heat flow.
+\\begin{equation}
+    R_{soil} = \\frac{\\ln(2z / r_{outer})}{2 \\pi k_{soil\\_eff}}
+\\end{equation}
+
+\\subsection{Step 2: Calculate Temperature Rise (\\(\\Delta T\\)) at an Affected Pipe}
+\\subsubsection*{Why it's necessary}
+With the heat flux (Q) from a source known, we can now calculate its effect at a distance. This step calculates the specific temperature rise at the exact centerline location of an 'Affected Pipe' caused by one 'Heat Source'.
+
+\\subsubsection*{How is it calculated?}
+This again uses the Method of Images. The temperature rise at any point in the soil is a function of its distance from the real heat source and its distance from the imaginary "image" source.
+\\begin{equation}
+    \\Delta T_{rise} = \\frac{Q}{2 \\pi k_{path\\_eff}} \\cdot \\ln(\\frac{d_{image}}{d_{real}})
+\\end{equation}
+
+\\subsection{Step 3: Summing the Effects \\& Final Temperature}
+\\subsubsection*{Why it's necessary}
+An affected pipe is often influenced by multiple heat sources. We must combine all these individual heating effects to find the final, true temperature.
+
+\\subsubsection*{How is it done? The Principle of Superposition}
+The governing equations for steady-state heat conduction are linear. This means we can use the \\textbf{Principle of Superposition}, which states that the total effect of multiple influences is the simple sum of the individual effects.
+\\begin{equation}
+    T_{final} = T_{soil} + \\Sigma(\\Delta T_{rise\\_from\\_source\\_1} + \\Delta T_{rise\\_from\\_source\\_2} + ...)
+\\end{equation}
+    `;
+
+    return `
+\\documentclass{article}
+\\usepackage{graphicx}
+\\usepackage{amsmath}
+\\usepackage{geometry}
+\\usepackage{hyperref}
+\\geometry{a4paper, margin=1in}
+
+\\title{Heat Transfer Calculation Report \\\\ \\large ${escapeLatex(projectInfo.name)}}
+\\author{${escapeLatex(projectInfo.engineer)}}
+\\date{${escapeLatex(projectInfo.date)}}
+
+\\begin{document}
+\\maketitle
+\\tableofcontents
+\\newpage
+
+\\section{Project Information}
+${projectInfoSection}
+
+\\section{Input Parameters}
+${soilInputTable}
+${pipeInputTable}
+
+\\section{Calculation Results}
+${resultsTable}
+
+\\section{Detailed Calculations}
+${sourceCalcTable}
+\\subsection{Affected Pipe Interactions}
+${affectedPipeCalcSection}
+
+\\newpage
+${methodology}
+
+\\end{document}
+    `;
+}
+
+function handleLoadExample() {
+    clearInputs();
+    
+    projectNameInput.value = 'Example Project: Parallel Pipes';
+    projectLocationInput.value = 'Springfield, USA';
+    evalDateInput.value = new Date().toISOString().split('T')[0];
+    engineerNameInput.value = 'J. Sigler';
+    projectDescriptionInput.value = 'Two parallel heat sources influencing a central affected pipe.';
+
+    soilTempInput.value = '60';
+
+    addSoilLayer({ k: 1.5, thickness: CONVERSIONS.ftToM(10) });
+    addSoilLayer({ k: 2.2, thickness: CONVERSIONS.ftToM(20) });
+
+    addPipe({
+        name: 'Source Pipe A', role: 'heat_source', orientation: 'parallel',
+        x: CONVERSIONS.ftToM(-10), y: 0, z: CONVERSIONS.ftToM(5),
+        temp: CONVERSIONS.FtoC(450), od: CONVERSIONS.inToM(8.625), thickness: CONVERSIONS.inToM(0.322),
+        k_pipe: 54, ins_thickness: CONVERSIONS.inToM(2), k_ins: 0.05,
+        bed_thickness: CONVERSIONS.inToM(6), k_bedding: 0.35
+    });
+
+    addPipe({
+        name: 'Affected Pipe', role: 'affected_pipe', orientation: 'parallel',
+        x: 0, y: 0, z: CONVERSIONS.ftToM(6),
+        od: CONVERSIONS.inToM(12.75), thickness: CONVERSIONS.inToM(0.406),
+        k_pipe: 54, ins_thickness: 0, k_ins: 0,
+        bed_thickness: CONVERSIONS.inToM(6), k_bedding: 0.35
+    });
+    
+    addPipe({
+        name: 'Source Pipe B', role: 'heat_source', orientation: 'parallel',
+        x: CONVERSIONS.ftToM(10), y: 0, z: CONVERSIONS.ftToM(7),
+        temp: CONVERSIONS.FtoC(300), od: CONVERSIONS.inToM(6.625), thickness: CONVERSIONS.inToM(0.280),
+        k_pipe: 54, ins_thickness: CONVERSIONS.inToM(1), k_ins: 0.04,
+        bed_thickness: CONVERSIONS.inToM(6), k_bedding: 0.35
+    });
+    
+    addPipe({
+        name: 'Perp Source C', role: 'heat_source', orientation: 'perpendicular',
+        x: 0, y: CONVERSIONS.ftToM(0), z: CONVERSIONS.ftToM(15),
+        temp: CONVERSIONS.FtoC(200), od: CONVERSIONS.inToM(4.5), thickness: CONVERSIONS.inToM(0.237),
+        k_pipe: 54, ins_thickness: 0, k_ins: 0,
+        bed_thickness: 0, k_bedding: 0
+    });
+    
+    addIsotherm({temp: 100, color: '#FFFF00'});
+    addIsotherm({temp: 150, color: '#FFA500'});
+    addIsotherm({temp: 200, color: '#FF0000'});
+    
+    addIsoSurface({temp: 90, color: '#48BFE3', opacity: 0.3});
+    addIsoSurface({temp: 120, color: '#FFD700', opacity: 0.3});
+
+    handleCalculate();
+}
+
+function clearInputs() {
+    pipeList.innerHTML = '';
+    soilLayersList.innerHTML = '';
+    isothermList.innerHTML = '';
+    isosurfaceList.innerHTML = '';
+    isotherms = [];
+    isoSurfaces = [];
+    pipeIdCounter = 0;
+    isothermIdCounter = 0;
+    isoSurfaceIdCounter = 0;
+}
+
+// --- Event Handlers ---
+function handleCalculate() {
+    let hasError = false;
+    pipeList.querySelectorAll('.pipe-row').forEach(row => {
+        if (!validatePipeRow(row as HTMLElement)) {
+            hasError = true;
+        }
+    });
+
+    if (hasError) {
+        errorContainer.textContent = 'Please fix the errors in the pipe configurations before calculating.';
+        errorContainer.style.display = 'block';
+        resultsTableContainer.innerHTML = '';
+        visualizationOptions.style.display = 'none';
+        outputWrapper.style.display = 'block';
         return;
     }
+    
+    errorContainer.style.display = 'none';
+    outputWrapper.style.display = 'block';
+    
+    try {
+        const pipes = getPipes();
+        const soilLayers = getSoilLayers();
+        const rawSoilTemp = parseFloat(soilTempInput.value) || 0;
+        const T_soil_C = CONVERSIONS.FtoC(rawSoilTemp);
 
-    customMaterials.push({ id: `custom-${Date.now()}-${Math.random()}`, type, name, k: kValueWmk });
-    saveCustomMaterials();
-    renderMaterialLibrary();
-    populateAllMaterialSelects();
+        currentCalculationData = calculateTemperatures(pipes, soilLayers, T_soil_C);
+
+        renderResultsTable(currentCalculationData.results);
+        
+        visualizationOptions.style.display = 'flex';
+        handleViewModeChange();
+
+    } catch (e: any) {
+        console.error("Calculation failed:", e);
+        errorContainer.textContent = `Calculation failed: ${e.message}`;
+        errorContainer.style.display = 'block';
+        resultsTableContainer.innerHTML = '';
+        visualizationOptions.style.display = 'none';
+        currentCalculationData = null;
+    }
 }
 
-function removeCustomMaterial(id: string) {
-    customMaterials = customMaterials.filter(m => m.id !== id);
-    saveCustomMaterials();
-    renderMaterialLibrary();
-    populateAllMaterialSelects();
+function handleViewModeChange() {
+    const selectedMode = (document.querySelector('input[name="view-mode"]:checked') as HTMLInputElement).value as ViewMode;
+    currentViewMode = selectedMode;
+
+    if (selectedMode === '2d') {
+        canvas.style.display = 'block';
+        webglCanvas.style.display = 'none';
+        isothermControls.classList.add('active');
+        isosurfaceControls.classList.remove('active');
+        visToggles.style.display = 'flex';
+        threeDManager?.destroy();
+        threeDManager = null;
+        if(currentCalculationData) {
+            draw2DScene(currentCalculationData.sceneData);
+        }
+    } else { // 3D view
+        canvas.style.display = 'none';
+        webglCanvas.style.display = 'block';
+        isothermControls.classList.remove('active');
+        isosurfaceControls.classList.add('active');
+        visToggles.style.display = 'none';
+        if (!threeDManager) {
+            threeDManager = new ThreeDManager(webglCanvas);
+        }
+        if(currentCalculationData) {
+            threeDManager.buildScene(currentCalculationData.sceneData, isoSurfaces);
+        }
+    }
 }
 
+
+function renderResultsTable(results: CalculationData['results']) {
+    const tempUnit = UNIT_SYSTEMS.imperial.temp;
+    let tableHtml = `
+        <table>
+            <thead>
+                <tr>
+                    <th>Pipe ID</th>
+                    <th>Final Temperature (${tempUnit})</th>
+                    <th>Final Temperature (°C)</th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
+    results.sort((a,b) => a.pipeId - b.pipeId).forEach(result => {
+        const displayTemp = CONVERSIONS.CtoF(result.finalTemp);
+        tableHtml += `
+            <tr>
+                <td class="pipe-id-cell">${escapeLatex(result.pipeName)}</td>
+                <td class="temp-cell">${displayTemp.toFixed(2)}</td>
+                <td class="temp-cell">${result.finalTemp.toFixed(2)}</td>
+            </tr>
+        `;
+    });
+    tableHtml += '</tbody></table>';
+    resultsTableContainer.innerHTML = tableHtml;
+}
+
+// ... (Material Library functions: setupMaterialForms, loadMaterials, saveMaterials, renderMaterialLibrary, populateMaterialSelect, populateAllMaterialSelects)
 function setupMaterialForms() {
-    const forms: {formId: string, type: MaterialType}[] = [
-        { formId: 'add-soil-material-form', type: 'soil' },
-        { formId: 'add-pipe-material-form', type: 'pipe' },
-        { formId: 'add-insulation-material-form', type: 'insulation' },
-        { formId: 'add-bedding-material-form', type: 'bedding' },
+    const formIds: { form: string, table: string, type: MaterialType }[] = [
+        { form: 'add-soil-material-form', table: 'soil-material-table', type: 'soil' },
+        { form: 'add-pipe-material-form', table: 'pipe-material-table', type: 'pipe' },
+        { form: 'add-insulation-material-form', table: 'insulation-material-table', type: 'insulation' },
+        { form: 'add-bedding-material-form', table: 'bedding-material-table', type: 'bedding' }
     ];
 
-    forms.forEach(({formId, type}) => {
-        const form = document.getElementById(formId) as HTMLFormElement;
-        form.addEventListener('submit', (e) => {
+    formIds.forEach(({ form, table, type }) => {
+        const formEl = document.getElementById(form) as HTMLFormElement;
+        formEl.addEventListener('submit', (e) => {
             e.preventDefault();
-            const nameInput = form.querySelector('input[type="text"]') as HTMLInputElement;
-            const kInput = form.querySelector('input[type="number"]') as HTMLInputElement;
-            addCustomMaterial(type, nameInput.value, parseFloat(kInput.value));
-            form.reset();
+            const nameInput = formEl.querySelector('input[type="text"]') as HTMLInputElement;
+            const kInput = formEl.querySelector('input[type="number"]') as HTMLInputElement;
+            const name = nameInput.value.trim();
+            const kImperial = parseFloat(kInput.value);
+
+            if (name && !isNaN(kImperial)) {
+                const newMaterial: CustomMaterial = {
+                    id: `${type}-${Date.now()}`,
+                    type,
+                    name,
+                    k: CONVERSIONS.btuHrFtFtoWMK(kImperial)
+                };
+                customMaterials.push(newMaterial);
+                saveMaterials();
+                renderMaterialLibrary();
+                populateAllMaterialSelects();
+                formEl.reset();
+            }
         });
     });
 }
 
+function loadMaterials() {
+    try {
+        const stored = localStorage.getItem(MATERIAL_STORAGE_KEY);
+        if (stored) {
+            customMaterials = JSON.parse(stored);
+        }
+    } catch (e) {
+        console.error("Failed to load materials from localStorage", e);
+        customMaterials = [];
+    }
+}
+
+function saveMaterials() {
+    try {
+        localStorage.setItem(MATERIAL_STORAGE_KEY, JSON.stringify(customMaterials));
+    } catch (e) {
+        console.error("Failed to save materials to localStorage", e);
+    }
+}
+
 function renderMaterialLibrary() {
-    const tables: {tableId: string, type: MaterialType}[] = [
-        { tableId: 'soil-material-table', type: 'soil' },
-        { tableId: 'pipe-material-table', type: 'pipe' },
-        { tableId: 'insulation-material-table', type: 'insulation' },
-        { tableId: 'bedding-material-table', type: 'bedding' },
+    const tableIds: { table: string, type: MaterialType }[] = [
+        { table: 'soil-material-table', type: 'soil' },
+        { table: 'pipe-material-table', type: 'pipe' },
+        { table: 'insulation-material-table', type: 'insulation' },
+        { table: 'bedding-material-table', type: 'bedding' }
     ];
 
-    tables.forEach(({tableId, type}) => {
-        const tableBody = document.querySelector(`#${tableId} tbody`) as HTMLTableSectionElement;
-        tableBody.innerHTML = '';
-        customMaterials.filter(m => m.type === type).forEach(mat => {
-            const row = document.createElement('tr');
-            const kValueDisplay = CONVERSIONS.wmkToBtuHrFtF(mat.k);
-            
+    tableIds.forEach(({ table, type }) => {
+        const tbody = document.getElementById(table)!.querySelector('tbody')!;
+        tbody.innerHTML = '';
+        const materialsOfType = customMaterials.filter(m => m.type === type);
+        materialsOfType.forEach(material => {
+            const row = tbody.insertRow();
             row.innerHTML = `
-                <td>${mat.name}</td>
-                <td>${kValueDisplay.toFixed(3)}</td>
-                <td><button class="remove-btn" title="Remove Material">&times;</button></td>
+                <td>${escapeLatex(material.name)}</td>
+                <td>${CONVERSIONS.wmkToBtuHrFtF(material.k).toFixed(3)}</td>
+                <td><button type="button" class="remove-btn" data-id="${material.id}">&times;</button></td>
             `;
-            row.querySelector('.remove-btn')?.addEventListener('click', () => removeCustomMaterial(mat.id));
-            tableBody.appendChild(row);
+            row.querySelector('.remove-btn')?.addEventListener('click', () => {
+                customMaterials = customMaterials.filter(m => m.id !== material.id);
+                saveMaterials();
+                renderMaterialLibrary();
+                populateAllMaterialSelects();
+            });
         });
     });
 }
 
 function populateMaterialSelect(select: HTMLSelectElement, type: MaterialType) {
     select.innerHTML = '';
-    
-    // Add presets
-    const presets = MATERIAL_PRESETS[type as keyof typeof MATERIAL_PRESETS] || [];
-    presets.forEach(p => {
-        const option = document.createElement('option');
-        option.value = p.k.toString();
-        
-        const kValueDisplay = CONVERSIONS.wmkToBtuHrFtF(p.k);
-        let kString = p.k > 0 ? `(k=${kValueDisplay.toFixed(2)})` : '';
-        if(p.name.toLowerCase().includes('none') || p.name.toLowerCase().includes('insulation')) {
-           kString = '';
-        }
-        option.textContent = `${p.name} ${kString}`;
-        select.appendChild(option);
-    });
+    const presets = MATERIAL_PRESETS[type] || [];
+    const custom = customMaterials.filter(m => m.type === type);
 
-    // Add separator if custom materials exist
-    const customForType = customMaterials.filter(m => m.type === type);
-    if (customForType.length > 0) {
-        const separator = document.createElement('option');
-        separator.disabled = true;
-        separator.textContent = '--- Custom ---';
-        select.appendChild(separator);
-    }
-    
-    // Add custom materials
-    customForType.forEach(mat => {
+    const addOption = (name: string, k: number, isCustom: boolean) => {
         const option = document.createElement('option');
-        option.value = mat.k.toString();
-        const kValueDisplay = CONVERSIONS.wmkToBtuHrFtF(mat.k);
-        option.textContent = `${mat.name} (k=${kValueDisplay.toFixed(2)})`;
+        option.value = k.toString();
+        option.textContent = isCustom ? `* ${name}` : name;
         select.appendChild(option);
-    });
+    };
+
+    if (presets.length > 0) {
+        const presetGroup = document.createElement('optgroup');
+        presetGroup.label = 'Standard Materials';
+        presets.forEach(p => addOption(p.name, p.k, false));
+        select.appendChild(presetGroup);
+    }
+
+    if (custom.length > 0) {
+        const customGroup = document.createElement('optgroup');
+        customGroup.label = 'Custom Materials';
+        custom.forEach(p => addOption(p.name, p.k, true));
+        select.appendChild(customGroup);
+    }
+
+    if (select.options.length === 0) {
+        select.innerHTML = '<option value="">No materials defined</option>';
+    }
 }
 
 function populateAllMaterialSelects() {
-    document.querySelectorAll('.soil-layer-material-select').forEach(el => populateMaterialSelect(el as HTMLSelectElement, 'soil'));
-    document.querySelectorAll('.pipe-material-select').forEach(el => populateMaterialSelect(el as HTMLSelectElement, 'pipe'));
-    document.querySelectorAll('.pipe-insulation-material-select').forEach(el => populateMaterialSelect(el as HTMLSelectElement, 'insulation'));
-    document.querySelectorAll('.pipe-bedding-material-select').forEach(el => populateMaterialSelect(el as HTMLSelectElement, 'bedding'));
+    document.querySelectorAll('.soil-layer-material-select').forEach(s => populateMaterialSelect(s as HTMLSelectElement, 'soil'));
+    document.querySelectorAll('.pipe-material-select').forEach(s => populateMaterialSelect(s as HTMLSelectElement, 'pipe'));
+    document.querySelectorAll('.pipe-insulation-material-select').forEach(s => populateMaterialSelect(s as HTMLSelectElement, 'insulation'));
+    document.querySelectorAll('.pipe-bedding-material-select').forEach(s => populateMaterialSelect(s as HTMLSelectElement, 'bedding'));
 }
 
-
-// --- Event Handlers & Main Logic ---
-
-function handleCalculate() {
-    errorContainer.style.display = 'none';
-    errorContainer.textContent = '';
-    
-    let hasErrors = false;
-    document.querySelectorAll('.pipe-row').forEach(row => {
-        if (!validatePipeRow(row as HTMLElement)) {
-            hasErrors = true;
-        }
-    });
-    if (hasErrors) {
-        errorContainer.textContent = 'Please fix the errors in the pipe configurations before calculating.';
-        errorContainer.style.display = 'block';
-        return;
-    }
-
-    try {
-        const systemDefaults = UNIT_SYSTEMS.imperial.defaults;
-        const rawSoilTemp = parseFloat(soilTempInput.value) || systemDefaults.temp;
-        const T_soil_C = CONVERSIONS.FtoC(rawSoilTemp);
-
-        const pipes = getPipes();
-        const soilLayers = getSoilLayers();
-        if (soilLayers.length === 0) {
-           errorContainer.textContent = 'At least one soil layer must be defined.';
-           errorContainer.style.display = 'block';
-           return;
-        }
-
-        currentCalculationData = calculateTemperatures(pipes, soilLayers, T_soil_C);
-
-        renderResultsTable(currentCalculationData.results);
-        updateView();
-        
-        outputWrapper.style.display = 'flex';
-        visualizationOptions.style.display = 'flex';
-
-    } catch (e) {
-        console.error("Calculation failed:", e);
-        errorContainer.textContent = e instanceof Error ? e.message : 'An unexpected error occurred during calculation.';
-        errorContainer.style.display = 'block';
-        outputWrapper.style.display = 'flex';
-        visualizationOptions.style.display = 'none';
-    }
-}
-
-function updateView() {
-    if (!currentCalculationData) return;
-    const mode = (document.querySelector('input[name="view-mode"]:checked') as HTMLInputElement).value as ViewMode;
-    currentViewMode = mode;
-    
-    canvas.style.display = mode === '2d' ? 'block' : 'none';
-    webglCanvas.style.display = mode === '3d' ? 'block' : 'none';
-    
-    visToggles.style.display = mode === '2d' ? 'flex' : 'none';
-    isothermControls.classList.toggle('active', mode === '2d');
-    isosurfaceControls.classList.toggle('active', mode === '3d');
-
-    if (mode === '2d') {
-        threeDManager?.stopAnimation();
-        draw2DScene(currentCalculationData.sceneData);
-    } else { // 3D
-        if (!threeDManager) {
-            threeDManager = new ThreeDManager(webglCanvas);
-        }
-        threeDManager.buildScene(currentCalculationData.sceneData, isoSurfaces);
-        threeDManager.startAnimation();
-    }
-}
-
-function renderResultsTable(results: {pipeId: number, pipeName: string, finalTemp: number}[]) {
-    const tempUnit = UNIT_SYSTEMS.imperial.temp;
-    let tableHtml = `
-        <table>
-            <thead>
-                <tr>
-                    <th>Pipe</th>
-                    <th>Final Temperature (${tempUnit})</th>
-                </tr>
-            </thead>
-            <tbody>`;
-
-    results.forEach(result => {
-        const displayTemp = CONVERSIONS.CtoF(result.finalTemp);
-        tableHtml += `
-            <tr>
-                <td class="pipe-id-cell">${result.pipeName}</td>
-                <td class="temp-cell">${displayTemp.toFixed(1)}</td>
-            </tr>`;
-    });
-    
-    tableHtml += `</tbody></table>`;
-    resultsTableContainer.innerHTML = tableHtml;
-}
-
-function loadExample() {
-    resetToDefaults();
-    
-    // Imperial Example
-    // Project Info
-    projectNameInput.value = "Downtown Steam Crossing";
-    projectLocationInput.value = "Springfield";
-    systemNumberInput.value = "SYS-12345-A";
-    engineerNameInput.value = "Jane Doe, P.Eng.";
-    evalDateInput.valueAsDate = new Date();
-    revisionNumberInput.value = "1";
-    projectDescriptionInput.value = "Verification of temperature on existing gas main due to new adjacent steam line installation.";
-
-    // Environment
-    soilTempInput.value = "60";
-    addSoilLayer({ k: 1.5, thickness: CONVERSIONS.ftToM(10) }); // Moist Soil
-    addSoilLayer({ k: 2.5, thickness: CONVERSIONS.ftToM(20) }); // Saturated Soil
-
-    // Pipes
-    addPipe({
-        name: 'New Steam Line', role: 'heat_source', orientation: 'parallel',
-        x: CONVERSIONS.ftToM(-3), y: 0, z: CONVERSIONS.ftToM(5),
-        temp: CONVERSIONS.FtoC(450), od: CONVERSIONS.inToM(12.75),
-        thickness: CONVERSIONS.inToM(0.406), k_pipe: 54,
-        ins_thickness: CONVERSIONS.inToM(2), k_ins: 0.05,
-        bed_thickness: CONVERSIONS.inToM(6), k_bedding: 0.27
-    });
-    addPipe({
-        name: 'Existing Gas Main', role: 'affected_pipe', orientation: 'parallel',
-        x: CONVERSIONS.ftToM(3), y: 0, z: CONVERSIONS.ftToM(4),
-        od: CONVERSIONS.inToM(8.625), thickness: CONVERSIONS.inToM(0.322),
-        k_pipe: 54, ins_thickness: 0, k_ins: 0,
-        bed_thickness: CONVERSIONS.inToM(6), k_bedding: 0.27
-    });
-     addPipe({
-        name: 'Crossing Water Line', role: 'affected_pipe', orientation: 'perpendicular',
-        x: 0, y: CONVERSIONS.ftToM(10), z: CONVERSIONS.ftToM(6),
-        od: CONVERSIONS.inToM(6.625), thickness: CONVERSIONS.inToM(0.280),
-        k_pipe: 54, ins_thickness: 0, k_ins: 0,
-        bed_thickness: 0, k_bedding: 0
-    });
-
-    addIsotherm({temp: 85, color: '#ffdd00'});
-    addIsoSurface({temp: 85, color: '#ffdd00', opacity: 0.3});
-
-    handleCalculate();
-    
-    // Switch to calculator tab if not already there
-    document.querySelector('.tab-link[data-tab="calculator"]')?.dispatchEvent(new MouseEvent('click'));
-}
-
-function resetToDefaults() {
-    // Clear dynamic lists
-    pipeList.innerHTML = '';
-    soilLayersList.innerHTML = '';
-    isothermList.innerHTML = '';
-    isosurfaceList.innerHTML = '';
-    
-    pipeIdCounter = 0;
-    isothermIdCounter = 0;
-    isoSurfaceIdCounter = 0;
-
-    isotherms = [];
-    isoSurfaces = [];
-    
-    // Reset forms
-    const calculatorForm = document.getElementById('calculator-container')?.closest('form') as HTMLFormElement | null;
-    if(calculatorForm) calculatorForm.reset();
-
-    projectNameInput.value = "";
-    projectLocationInput.value = "";
-    systemNumberInput.value = "";
-    engineerNameInput.value = "";
-    evalDateInput.value = "";
-    revisionNumberInput.value = "1";
-    projectDescriptionInput.value = "";
-
-    // Reset state
-    outputWrapper.style.display = 'none';
-    currentCalculationData = null;
-    updateUnitsUI(); // This will set default soil temp based on units
-    threeDManager?.stopAnimation();
-}
-
+// --- Scenario Management ---
 function saveScenario() {
-    if (!currentCalculationData) {
-        alert("Please run a calculation before saving.");
-        return;
-    }
     const scenario = {
         projectInfo: getProjectInfo(),
-        unitSystem: 'imperial',
-        soilTemp: parseFloat(soilTempInput.value),
+        soilTemp: soilTempInput.value,
         soilLayers: getSoilLayers().map(l => ({ k: l.k, thickness: l.thickness })),
         pipes: getPipes().map(p => ({
-            name: p.name,
-            role: p.role,
-            orientation: p.orientation,
-            x: p.x, y: p.y, z: p.z,
-            temp: p.temp,
-            od: p.od, thickness: p.thickness, k_pipe: p.k_pipe,
-            ins_thickness: p.ins_thickness, k_ins: p.k_ins,
+            name: p.name, role: p.role, orientation: p.orientation,
+            x: p.x, y: p.y, z: p.z, temp: p.temp,
+            od: p.od, thickness: p.thickness,
+            k_pipe: p.k_pipe, ins_thickness: p.ins_thickness, k_ins: p.k_ins,
             bed_thickness: p.bed_thickness, k_bedding: p.k_bedding,
         })),
-        isotherms,
-        isoSurfaces,
-        showFluxVectors
+        isotherms: isotherms,
+        isoSurfaces: isoSurfaces,
     };
-    
     const blob = new Blob([JSON.stringify(scenario, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    const safeName = scenario.projectInfo.name.replace(/[^a-z0-9]/gi, '_').toLowerCase() || 'scenario';
     a.href = url;
+    const safeName = (scenario.projectInfo.name || 'scenario').replace(/[^a-z0-9]/gi, '_').toLowerCase();
     a.download = `${safeName}.json`;
     document.body.appendChild(a);
-    a.click();
+a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 }
 
-function loadScenarioFromFile(event: Event) {
-    const file = (event.target as HTMLInputElement).files?.[0];
-    if (!file) return;
-
+function loadScenario(event: Event) {
+    const input = event.target as HTMLInputElement;
+    if (!input.files || input.files.length === 0) return;
+    const file = input.files[0];
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = () => {
         try {
-            const scenario = JSON.parse(e.target?.result as string);
-            applyScenario(scenario);
-        } catch (error) {
-            console.error("Error parsing scenario file:", error);
-            alert("Could not load scenario. The file may be corrupt or invalid.");
+            const scenario = JSON.parse(reader.result as string);
+            clearInputs();
+            
+            const { projectInfo, soilTemp, soilLayers, pipes: loadedPipes, isotherms: loadedIsotherms, isoSurfaces: loadedIsoSurfaces } = scenario;
+            projectNameInput.value = projectInfo.name || '';
+            projectLocationInput.value = projectInfo.location || '';
+            systemNumberInput.value = projectInfo.system || '';
+            engineerNameInput.value = projectInfo.engineer || '';
+            evalDateInput.value = projectInfo.date || new Date().toISOString().split('T')[0];
+            revisionNumberInput.value = projectInfo.revision || '1';
+            projectDescriptionInput.value = projectInfo.description || '';
+            soilTempInput.value = String(soilTemp);
+
+            soilLayers.forEach((l: any) => addSoilLayer(l));
+            loadedPipes.forEach((p: any) => addPipe(p));
+            if(loadedIsotherms) loadedIsotherms.forEach((iso: any) => addIsotherm(iso));
+            if(loadedIsoSurfaces) loadedIsoSurfaces.forEach((iso: any) => addIsoSurface(iso));
+
+            populateAllMaterialSelects(); // Ensure selects are populated before setting values
+            
+            // Re-set select values after population
+            getPipes().forEach((pipe, i) => {
+                const data = loadedPipes[i];
+                const el = pipe.element;
+                (el.querySelector('.pipe-material-select') as HTMLSelectElement).value = data.k_pipe?.toString() || '';
+                (el.querySelector('.pipe-insulation-material-select') as HTMLSelectElement).value = data.k_ins?.toString() || '0';
+                (el.querySelector('.pipe-bedding-material-select') as HTMLSelectElement).value = data.k_bedding?.toString() || '0';
+            });
+            getSoilLayers().forEach((layer, i) => {
+                const data = soilLayers[i];
+                (layer.element.querySelector('.soil-layer-material-select') as HTMLSelectElement).value = data.k?.toString() || '';
+            });
+
+            handleCalculate();
+        } catch (e) {
+            console.error("Failed to load scenario:", e);
+            alert("Error: The selected file is not a valid scenario file.");
+        } finally {
+            input.value = ''; // Reset input to allow loading the same file again
         }
     };
     reader.readAsText(file);
 }
 
-function applyScenario(scenario: any) {
-    resetToDefaults();
-    
-    updateUnitsUI();
-    
-    // Project Info
-    const proj = scenario.projectInfo;
-    projectNameInput.value = proj.name || '';
-    projectLocationInput.value = proj.location || '';
-    systemNumberInput.value = proj.system || '';
-    engineerNameInput.value = proj.engineer || '';
-    evalDateInput.value = proj.date || '';
-    revisionNumberInput.value = proj.revision || '1';
-    projectDescriptionInput.value = proj.description || '';
-    
-    soilTempInput.value = scenario.soilTemp.toString();
-    
-    scenario.soilLayers.forEach((l: any) => addSoilLayer(l));
-    scenario.pipes.forEach((p: any) => addPipe(p));
-    
-    (scenario.isotherms || []).forEach((iso: any) => addIsotherm(iso));
-    (scenario.isoSurfaces || []).forEach((surf: any) => addIsoSurface(surf));
-    
-    toggleFluxVectors.checked = scenario.showFluxVectors || false;
-    showFluxVectors = toggleFluxVectors.checked;
-
-    handleCalculate();
-}
-
-function copyLatexToClipboard() {
-  if (!currentCalculationData) {
-    alert("Please run a calculation first.");
-    return;
-  }
-  navigator.clipboard.writeText(currentCalculationData.latex).then(() => {
-    copyBtnText.textContent = 'Copied!';
-    setTimeout(() => {
-      copyBtnText.textContent = 'Copy LaTeX Report';
-    }, 2000);
-  }, (err) => {
-    console.error('Could not copy text: ', err);
-    alert('Failed to copy report.');
-  });
-}
-
-function sanitizeLatex(text: string): string {
-    if (!text) return '';
-    return text.replace(/([#$&%_{}])/g, '\\$1').replace(/\\/g, '\\textbackslash{}');
-}
-
-function generateLatexReport(
-    projectInfo: ProjectInfo,
-    inputs: { pipes: Pipe[]; soilLayers: SoilLayer[]; T_soil: number },
-    results: { pipeId: number; pipeName: string; finalTemp: number }[],
-    detailedCalcs: DetailedCalculations
-): string {
-    const { pipes, soilLayers, T_soil } = inputs;
-    const isImperial = true;
-
-    const header = `\\documentclass[11pt]{article}
-\\usepackage{amsmath}
-\\usepackage{graphicx}
-\\usepackage{geometry}
-\\usepackage{booktabs}
-\\usepackage{hyperref}
-\\usepackage[T1]{fontenc}
-\\geometry{a4paper, margin=1in}
-
-\\title{Pipeline Heat Transfer Analysis Report\\\\ \\large ${sanitizeLatex(projectInfo.name)}}
-\\author{${sanitizeLatex(projectInfo.engineer)}}
-\\date{${sanitizeLatex(projectInfo.date)}}
-
-\\begin{document}
-\\maketitle
-\\thispagestyle{empty}
-\\newpage
-\\tableofcontents
-\\newpage
-
-\\section{Project Summary}
-\\begin{tabular}{@{}ll}
-    \\textbf{Project Name:} & ${sanitizeLatex(projectInfo.name)} \\\\
-    \\textbf{Location:} & ${sanitizeLatex(projectInfo.location)} \\\\
-    \\textbf{System Number:} & ${sanitizeLatex(projectInfo.system)} \\\\
-    \\textbf{Engineer:} & ${sanitizeLatex(projectInfo.engineer)} \\\\
-    \\textbf{Date:} & ${sanitizeLatex(projectInfo.date)} \\\\
-    \\textbf{Revision:} & ${sanitizeLatex(projectInfo.revision)} \\\\
-\\end{tabular}
-
-\\subsection*{Description}
-${sanitizeLatex(projectInfo.description)}
-
-\\section{Methodology}
-This analysis calculates the steady-state temperature of buried pipelines subjected to heat transfer from adjacent heat source pipelines and the surrounding soil. The calculation is based on the principle of superposition and the method of images to model the ground surface as an adiabatic (no heat flow) boundary.
-
-The heat flux, \\(Q\\) (W/m), from a source pipe is determined by modeling the system as a network of thermal resistances:
-\\begin{equation}
-    Q = \\frac{\\Delta T}{R_{total}} = \\frac{T_{pipe} - T_{soil}}{R_{pipe} + R_{ins} + R_{bed} + R_{soil}}
-\\end{equation}
-Where \\(R\\) represents the thermal resistance per unit length (K·m/W) for the pipe wall, insulation, bedding, and the surrounding soil, respectively.
-
-The temperature rise, \\(\\Delta T_{rise}\\), at a specific point caused by a line heat source \\(Q\\) is calculated using:
-\\begin{equation}
-    \\Delta T_{rise} = \\frac{Q}{2 \\pi k_{eff}} \\ln\\left(\\frac{d_{image}}{d_{real}}\\right)
-\\end{equation}
-Where \\(k_{eff}\\) is the effective thermal conductivity of the path, \\(d_{real}\\) is the distance from the source center to the point, and \\(d_{image}\\) is the distance from the mirrored "image" source (reflected across the ground plane) to the point.
-
-The final temperature of an affected pipe is the sum of the ambient soil temperature and the cumulative temperature rises from all heat sources.
-
-\\section{Input Parameters}
-\\subsection{Ambient Conditions}
-Ambient Soil Temperature, \\(T_{soil}\\): ${T_soil.toFixed(2)}~^\\circ C (${CONVERSIONS.CtoF(T_soil).toFixed(2)}~^\\circ F)\\\\
-
-\\subsection{Soil Layer Properties}
-\\begin{table}[h!]
-\\centering
-\\begin{tabular}{lrrrr}
-\\toprule
-\\textbf{Depth Top} & \\textbf{Depth Bottom} & \\textbf{Thickness} & \\multicolumn{2}{c}{\\textbf{Thermal Conductivity (k)}} \\\\
-\\cmidrule(lr){4-5}
- & & & \\textbf{(W/m-K)} & \\textbf{(BTU/hr-ft-F)} \\\\
-\\midrule
-`;
-
-    let soilTable = soilLayers.map(l => {
-        const dTop = `${l.depth_top.toFixed(2)}~m (${CONVERSIONS.mToFt(l.depth_top).toFixed(2)}~ft)`;
-        const dBot = `${l.depth_bottom.toFixed(2)}~m (${CONVERSIONS.mToFt(l.depth_bottom).toFixed(2)}~ft)`;
-        const thick = `${l.thickness.toFixed(2)}~m (${CONVERSIONS.mToFt(l.thickness).toFixed(2)}~ft)`;
-        const k_si = l.k.toFixed(3);
-        const k_imp = ` & ${CONVERSIONS.wmkToBtuHrFtF(l.k).toFixed(3)}`;
-        return `${dTop} & ${dBot} & ${thick} & ${k_si}${k_imp} \\\\`;
-    }).join('\n');
-
-    let pipeTable = `\\subsection{Pipeline Configuration}
-\\begin{table}[h!]
-\\centering
-\\resizebox{\\textwidth}{!}{%
-\\begin{tabular}{lcccccccc}
-\\toprule
-\\textbf{Pipe Name} & \\textbf{Role} & \\textbf{X (m)} & \\textbf{Y (m)} & \\textbf{Z (m)} & \\textbf{OD (mm)} & \\textbf{Temp (C)} & \\textbf{k\\textsubscript{pipe}} & \\textbf{k\\textsubscript{ins}} \\\\
-\\midrule
-`;
-    pipeTable += pipes.map(p => {
-        const tempStr = p.role === 'heat_source' ? p.temp!.toFixed(2) : 'N/A';
-        return `${sanitizeLatex(p.name)} & ${sanitizeLatex(p.role.replace('_',' '))} & ${p.x.toFixed(2)} & ${p.y.toFixed(2)} & ${p.z.toFixed(2)} & ${(p.od*1000).toFixed(2)} & ${tempStr} & ${p.k_pipe.toFixed(2)} & ${p.k_ins.toFixed(2)} \\\\`;
-    }).join('\n');
-    pipeTable += `\\bottomrule
-\\end{tabular}
-}
-\\caption{All coordinates are SI units. X/Y/Z are horizontal, perpendicular, and depth coordinates, respectively.}
-\\end{table}
-`;
-    
-    let sourceCalcs = `\\section{Heat Source Calculations}`;
-    detailedCalcs.sources.forEach(s => {
-        const p = pipes.find(pipe => pipe.id === s.pipeId)!;
-        sourceCalcs += `
-\\subsection{Source: ${sanitizeLatex(s.pipeName)}}
-\\subsubsection{Thermal Resistances}
-\\begin{itemize}
-    \\item Pipe Wall Resistance, \\(R_{pipe}\\):
-    \\begin{equation*}
-        R_{pipe} = \\frac{\\ln(OD / ID)}{2 \\pi k_{pipe}} = \\frac{\\ln(${((p.od/2)*1000).toFixed(2)} / ${((p.od/2 - p.thickness)*1000).toFixed(2)})}{2 \\pi \\times ${p.k_pipe.toFixed(2)}} = ${s.R_pipe.toExponential(3)} \\text{ K·m/W}
-    \\end{equation*}
-    \\item Insulation Resistance, \\(R_{ins}\\):
-    \\begin{equation*}
-        R_{ins} = \\frac{\\ln(r_{ins, outer} / r_{pipe, outer})}{2 \\pi k_{ins}} = \\frac{\\ln(${((p.od/2 + p.ins_thickness)*1000).toFixed(2)} / ${((p.od/2)*1000).toFixed(2)})}{2 \\pi \\times ${p.k_ins.toFixed(2)}} = ${s.R_ins.toExponential(3)} \\text{ K·m/W}
-    \\end{equation*}
-    \\item Bedding Resistance, \\(R_{bed}\\):
-    \\begin{equation*}
-        R_{bed} = \\frac{\\ln(r_{bed, outer} / r_{ins, outer})}{2 \\pi k_{bed}} = \\frac{\\ln(${((p.od/2 + p.ins_thickness + p.bed_thickness)*1000).toFixed(2)} / ${((p.od/2 + p.ins_thickness)*1000).toFixed(2)})}{2 \\pi \\times ${p.k_bedding.toFixed(2)}} = ${s.R_bed.toExponential(3)} \\text{ K·m/W}
-    \\end{equation*}
-    \\item Soil Resistance, \\(R_{soil}\\):
-    \\begin{equation*}
-         R_{soil} = \\frac{\\ln(2z / r_{bed, outer})}{2 \\pi k_{soil,eff}} = \\frac{\\ln(2 \\times ${p.z.toFixed(2)} / ${(p.od/2+p.ins_thickness+p.bed_thickness).toFixed(3)})}{2 \\pi \\times ${getEffectiveSoilKForPipe(p, soilLayers).toFixed(2)}} = ${s.R_soil.toExponential(3)} \\text{ K·m/W}
-    \\end{equation*}
-\\end{itemize}
-Total Resistance, \\(R_{total} = R_{pipe} + R_{ins} + R_{bed} + R_{soil} = ${s.R_total.toExponential(3)}\\) K·m/W.
-
-\\subsubsection{Heat Flux Calculation}
-\\begin{equation*}
-    Q = \\frac{T_{pipe} - T_{soil}}{R_{total}} = \\frac{${p.temp!.toFixed(2)} - ${T_soil.toFixed(2)}}{${s.R_total.toExponential(3)}} = \\mathbf{${s.Q.toFixed(2)} \\text{ W/m}}
-\\end{equation*}
-`;
-    });
-    
-    let affectedCalcs = `\\section{Affected Pipe Calculations}`;
-    detailedCalcs.affectedPipes.forEach(ap => {
-        affectedCalcs += `\\subsection{Pipe: ${sanitizeLatex(ap.pipeName)}}
-The final temperature is calculated by summing the temperature rises from each heat source.
-\\[ T_{final} = T_{soil} + \\sum \\Delta T_{rise} \\]
-\\begin{itemize}
-`;
-        ap.interactions.forEach(i => {
-            affectedCalcs += `
-    \\item \\textbf{From source "${sanitizeLatex(i.sourcePipeName)}":}
-    \\begin{itemize}
-        \\item Real distance, \\(d_{real}\\): ${i.d_real.toFixed(3)} m
-        \\item Image distance, \\(d_{image}\\): ${i.d_image.toFixed(3)} m
-        \\item Effective path conductivity, \\(k_{eff}\\): ${i.k_eff_path.toFixed(3)} W/m-K
-        \\item Temperature Rise:
-        \\begin{equation*}
-        \\Delta T = \\frac{Q}{2 \\pi k_{eff}} \\ln\\left(\\frac{d_{image}}{d_{real}}\\right) = \\frac{${(detailedCalcs.sources.find(s => s.pipeName === i.sourcePipeName)!.Q).toFixed(2)}}{2 \\pi \\times ${i.k_eff_path.toFixed(3)}} \\ln\\left(\\frac{${i.d_image.toFixed(3)}}{${i.d_real.toFixed(3)}}\\right) = ${i.tempRise.toFixed(2)}~^\\circ C
-        \\end{equation*}
-    \\end{itemize}
-`;
-        });
-        affectedCalcs += `\\end{itemize}
-\\textbf{Total Temperature Rise:} \\(\\sum \\Delta T_{rise} = ${ap.totalTempRise.toFixed(2)}~^\\circ C\\) \\\\
-\\textbf{Final Temperature:} \\(T_{final} = ${T_soil.toFixed(2)} + ${ap.totalTempRise.toFixed(2)} = \\mathbf{${ap.finalTemp.toFixed(2)}~^\\circ C}\\) (\\(\\mathbf{${CONVERSIONS.CtoF(ap.finalTemp).toFixed(2)}~^\\circ F}\\))\\\\`;
-    });
-
-    let finalResults = `\\section{Final Results Summary}
-\\begin{table}[h!]
-\\centering
-\\begin{tabular}{lcc}
-\\toprule
-\\textbf{Pipe Name} & \\textbf{Final Temperature (C)} & \\textbf{Final Temperature (F)} \\\\
-\\midrule
-`;
-    results.forEach(r => {
-        finalResults += `${sanitizeLatex(r.pipeName)} & ${r.finalTemp.toFixed(2)} & ${CONVERSIONS.CtoF(r.finalTemp).toFixed(2)} \\\\
-`;
-    });
-    finalResults += `\\bottomrule
-\\end{tabular}
-\\end{table}
-`;
-
-    const footer = `\\end{document}`;
-
-    return [header, soilTable, `\\bottomrule\n\\end{tabular}\n\\end{table}`, pipeTable, sourceCalcs, affectedCalcs, finalResults, footer].join('\n\n');
-}
-
-// --- Initialization ---
+// --- Initialisation ---
 document.addEventListener('DOMContentLoaded', () => {
-    // Service Worker registration is handled in index.html
-
-    // Event Listeners
+    // Basic setup
     setupTabs();
-    calculateBtn.addEventListener('click', handleCalculate);
-    exampleBtn.addEventListener('click', loadExample);
-    saveScenarioBtn.addEventListener('click', saveScenario);
-    loadScenarioBtn.addEventListener('click', () => loadScenarioInput.click());
-    loadScenarioInput.addEventListener('change', loadScenarioFromFile);
-    copyLatexBtn.addEventListener('click', copyLatexToClipboard);
+    evalDateInput.valueAsDate = new Date();
+    loadMaterials();
+    renderMaterialLibrary();
+    populateAllMaterialSelects();
+
+    // Event listeners
     addSoilLayerBtn.addEventListener('click', () => addSoilLayer());
-    addPipeBtn.addEventListener('click', () => addPipe());
+    addPipeBtn.addEventListener('click', () => addPipe({
+        ...UNIT_SYSTEMS.imperial.defaults,
+        x: CONVERSIONS.ftToM(UNIT_SYSTEMS.imperial.defaults.x),
+        y: 0,
+        z: CONVERSIONS.ftToM(UNIT_SYSTEMS.imperial.defaults.z),
+        od: CONVERSIONS.inToM(UNIT_SYSTEMS.imperial.defaults.od),
+        thickness: CONVERSIONS.inToM(UNIT_SYSTEMS.imperial.defaults.thick),
+        ins_thickness: CONVERSIONS.inToM(UNIT_SYSTEMS.imperial.defaults.ins),
+        bed_thickness: CONVERSIONS.inToM(UNIT_SYSTEMS.imperial.defaults.bed),
+    }));
+    calculateBtn.addEventListener('click', handleCalculate);
+    exampleBtn.addEventListener('click', handleLoadExample);
+
+    // Visualization
+    viewModeRadios.forEach(radio => radio.addEventListener('change', handleViewModeChange));
     addIsothermBtn.addEventListener('click', () => addIsotherm());
     addIsosurfaceBtn.addEventListener('click', () => addIsoSurface());
     toggleFluxVectors.addEventListener('change', (e) => {
         showFluxVectors = (e.target as HTMLInputElement).checked;
-        if (currentCalculationData) {
-            draw2DScene(currentCalculationData.sceneData);
-        }
+        if(currentCalculationData) draw2DScene(currentCalculationData.sceneData);
     });
 
+    // Canvas interactions
     canvas.addEventListener('mousemove', (e) => {
-        if(currentCalculationData && currentViewMode === '2d') {
-            showTooltip(e.clientX, e.clientY, currentCalculationData.sceneData);
-        }
+        if(currentCalculationData) showTooltip(e.clientX, e.clientY, currentCalculationData.sceneData)
     });
     canvas.addEventListener('mouseout', hideTooltip);
-    
-    viewModeRadios.forEach(radio => radio.addEventListener('change', updateView));
 
-    // Initial Setup
-    evalDateInput.valueAsDate = new Date();
-    customMaterials = loadCustomMaterials();
+    // Scenario Management
+    saveScenarioBtn.addEventListener('click', saveScenario);
+    loadScenarioBtn.addEventListener('click', () => loadScenarioInput.click());
+    loadScenarioInput.addEventListener('change', loadScenario);
+
+    copyLatexBtn.addEventListener('click', () => {
+        if (currentCalculationData && currentCalculationData.latex) {
+            navigator.clipboard.writeText(currentCalculationData.latex).then(() => {
+                copyBtnText.textContent = 'Copied!';
+                setTimeout(() => { copyBtnText.textContent = 'Copy LaTeX Report'; }, 2000);
+            }, (err) => {
+                console.error('Could not copy text: ', err);
+                alert('Failed to copy report to clipboard.');
+            });
+        }
+    });
+
+    // Material library forms
     setupMaterialForms();
-    renderMaterialLibrary();
+
+    // Load a default setup
+    addSoilLayer();
+    addPipe();
     updateUnitsUI();
-    resetToDefaults();
 });
