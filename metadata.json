@@ -1,0 +1,6 @@
+{
+  "name": "Heat Transfer CalculatorV10.7.14",
+  "description": "An offline tool to calculate the heat transfer rate from a buried steam pipeline to an adjacent natural gas pipeline.",
+  "requestFramePermissions": [],
+  "prompt": ""
+}
